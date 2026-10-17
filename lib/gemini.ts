@@ -6,7 +6,7 @@ if (!apiKey) {
   console.warn("GEMINI_API_KEY is not set");
 }
 
-const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-3.8-flash";
+const MODEL_NAME = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 
 function client() {
   if (!apiKey) throw new Error("GEMINI_API_KEY missing");

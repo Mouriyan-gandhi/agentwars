@@ -10,6 +10,7 @@ focuses on *what you click* and *what you'll see*.
 ## 1. Prerequisites
 
 - Node.js 20+ and `npm`
+- **Python 3.10+** (for the Google ADK multi-agent sidecar in `agent_service/`)
 - A free Supabase project — https://supabase.com
 - A free Google AI Studio API key — https://aistudio.google.com/apikey
 - A free Resend API key — https://resend.com
@@ -42,13 +43,17 @@ Fill in `.env.local`:
 
 ## 3. Create the database schema
 
-In the Supabase dashboard, open **SQL Editor → New query** and run the three
+In the Supabase dashboard, open **SQL Editor → New query** and run the five
 migration files in order:
 
 1. `supabase/migrations/001_init.sql` — core tables + seed orders and riders
 2. `supabase/migrations/002_portals.sql` — users table + rider assignments
 3. `supabase/migrations/003_feedback_and_sources.sql` — complaint source,
    categories, audio uploads, admin feedback table
+4. `supabase/migrations/004_more_orders_per_rider.sql` — adds 8 more orders so
+   every rider has 3-4 to raise issues against
+5. `supabase/migrations/005_agent_trace_and_evals.sql` — multi-agent trace +
+   eval tables + per-incident masked_input / pii_map / token / cost columns
 
 **Important before running 001:** edit the first seeded order so
 `customer_email` is the inbox where you want Resend to deliver demo emails
@@ -64,7 +69,32 @@ Supabase Storage requires nothing manual — the app creates its
 
 ---
 
-## 4. Start the dev server
+## 4. Start the ADK agent sidecar
+
+The multi-agent brain (Guardian → Decider → Evaluator → self-heal) runs as a
+Python FastAPI service on port 8787.
+
+```bash
+cd agent_service
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+export GEMINI_API_KEY=$(grep ^GEMINI_API_KEY ../.env | cut -d= -f2)
+export AGENT_SERVICE_TOKEN=dev-shared
+uvicorn main:app --port 8787 --reload
+```
+
+Checks:
+- `curl http://localhost:8787/healthz` → `{"status":"ok", …}`
+- `curl http://localhost:8787/a2a/agents` → the A2A agent card listing the agents
+
+> **If the sidecar isn't running, the app still works.** Next.js falls back
+> to the original single Gemini call so incidents still get a decision. The
+> admin trace panel will just be empty for that incident. Visible in
+> `action_logs` as `a2a_sidecar_unreachable`.
+
+---
+
+## 5. Start the dev server
 
 ```bash
 npm run dev
@@ -74,7 +104,7 @@ Open **http://localhost:3000**. You'll land on the three-portal picker.
 
 ---
 
-## 5. The three portals
+## 6. The three portals
 
 ### Landing page — `/`
 
@@ -139,17 +169,23 @@ What you see on the dashboard:
 
 What you can do on an incident detail (`/admin/incidents/<id>`):
 - See the raw rider or customer report (text, image preview, audio player)
-- Read the Gemini decision: type, order, summary, missing information,
+- Read the Decider's output: type, order, summary, missing information,
   recommended action, reasoning
+- **Multi-agent chain panel:** full `injection_filter → pii_guardian →
+  decider → pii_leak_check → evaluator` chain with per-agent timing +
+  token counts, a 4-metric strip (latency / tokens in / tokens out /
+  est. cost), and the 4-score evaluator card. A **Reveal real values**
+  toggle flips between masked tokens and the PII map — proof the brain
+  never saw the real values.
 - Read the full execution timeline (every state transition is a row)
 - Give **feedback** on the agent's decision:
   - ✓ **Right call** — stored for analytics
   - ✗ **Wrong call → should have been X** — the correction is injected into
-    every future Gemini call as a few-shot example (see §6 below)
+    every future Decider call as a few-shot example (see §7 below)
 
 ---
 
-## 6. Demo scenarios
+## 7. Demo scenarios
 
 The following three flows exercise every path in the system. Run them in
 order on a fresh database for the cleanest demo.
@@ -200,7 +236,7 @@ order on a fresh database for the cleanest demo.
 
 ---
 
-## 7. Common questions
+## 8. Common questions
 
 **How do I reset the demo state?**
 ```sql
@@ -216,9 +252,10 @@ email until you verify a domain at https://resend.com/domains. Edit the
 `PP-1001` seed to use that address.
 
 **Can I use a different Gemini model?**
-Yes — set `GEMINI_MODEL` in `.env.local`. Any model that supports
-`generateContent` with multimodal input (text / image / audio) will work.
-`gemini-3.8-flash` is the current fast + free-tier option.
+Yes — the Decider defaults to `gemini-2.0-flash` and the Evaluator to
+`gemini-2.0-flash-lite`. Edit `DEFAULT_MODEL` / `EVAL_MODEL` in
+`agent_service/agents.py`. The fallback path (used when the sidecar is down)
+reads `GEMINI_MODEL` from `.env`.
 
 **Where does audio actually go?**
 `MediaRecorder` → `POST /api/uploads` → Supabase Storage bucket
@@ -236,7 +273,7 @@ convenience. Replace with bcrypt / Supabase Auth magic links before shipping.
 
 ---
 
-## 8. One-shot verification (curl)
+## 9. One-shot verification (curl)
 
 If you want to confirm the full loop works without clicking through the UI:
 
