@@ -1,6 +1,11 @@
 import { supabaseAdmin } from "./supabase";
-import { fetchRecentFeedback, feedbackForA2A } from "./gemini";
-import { callA2AAnalyze, type A2AAnalyzeRequest } from "./agentA2A";
+import {
+  analyzeIncident,
+  fetchRecentFeedback,
+  feedbackForA2A,
+  type GeminiPart,
+} from "./gemini";
+import { callA2AAnalyze, type A2AAnalyzeRequest, type A2AAnalyzeResponse } from "./agentA2A";
 import { callTool } from "./mcp";
 import { generateToken } from "./token";
 import type {
@@ -115,8 +120,21 @@ export async function runWorkflow(incidentId: string): Promise<RunResult> {
         } catch { /* non-fatal */ }
       }
 
+      // Try the ADK sidecar first. If it's not running (local demo, cold
+      // deploy), fall back to the original single-call Gemini path so the
+      // incident still gets a decision — the fancy trace/eval panel will just
+      // be empty for that one. Keeps the demo alive without the sidecar.
       const a2aStart = Date.now();
-      const res = await callA2AAnalyze(req);
+      let res: A2AAnalyzeResponse;
+      try {
+        res = await callA2AAnalyze(req);
+      } catch (sidecarErr) {
+        const errMsg = sidecarErr instanceof Error ? sidecarErr.message : String(sidecarErr);
+        await logAction(incident.id, "a2a_sidecar_unreachable", "retrying", {
+          message: `Falling back to single Gemini call: ${errMsg}`,
+        });
+        res = await fallbackDirectGemini(incident, req);
+      }
       const a2aLatency = Date.now() - a2aStart;
       const decision = res.decision as unknown as AgentDecision;
 
@@ -602,6 +620,53 @@ function shortSubject(decision: AgentDecision): string {
   if (decision.incidentType === "location_inaccessible") return "location access issue";
   if (decision.incidentType === "damaged_parcel") return "damaged parcel";
   return "delivery issue";
+}
+
+/**
+ * Last-resort decision path when the ADK sidecar is unreachable. Calls the
+ * original single Gemini analyzer with whatever multimodal parts we have and
+ * shapes the result like an A2AAnalyzeResponse so the downstream workflow
+ * doesn't branch. No PII masking, no trace rows, no evaluator — just a plan.
+ */
+async function fallbackDirectGemini(
+  incident: Incident,
+  req: A2AAnalyzeRequest,
+): Promise<A2AAnalyzeResponse> {
+  const parts: GeminiPart[] = [];
+  if (incident.raw_input && incident.raw_input.trim()) {
+    parts.push({ kind: "text", text: incident.raw_input.trim() });
+  }
+  if (req.image_b64 && req.image_mime) {
+    parts.push({ kind: "image", mimeType: req.image_mime, base64: req.image_b64 });
+  }
+  if (req.audio_b64 && req.audio_mime) {
+    parts.push({ kind: "audio", mimeType: req.audio_mime, base64: req.audio_b64 });
+  }
+
+  const decision = await analyzeIncident({
+    parts,
+    source: incident.source,
+    issueCategory: incident.issue_category ?? null,
+    orderCode: req.order_context?.order_code ?? null,
+    feedbackExamples: (await fetchRecentFeedback(5)),
+  });
+
+  return {
+    incident_id: incident.id,
+    masked_input: incident.raw_input ?? "",
+    pii_map: {},
+    decision: decision as unknown as A2AAnalyzeResponse["decision"],
+    evaluation: {
+      truthfulness: 0,
+      hallucination: 0,
+      grounded: 0,
+      overall: 0,
+      verdict: "pass",
+      reasoning: "Sidecar unavailable; decision came from the fallback single-call path.",
+    },
+    trace: [],
+    heal_attempts: 0,
+  };
 }
 
 async function fetchBinary(url: string, fallbackMime: string) {
