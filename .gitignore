@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but the base64-encoded env is tracked; `python scripts/env_tool.py decode`
+# produces the real .env from it.
+!.env.b64
+!.env.example
 
 # vercel
 .vercel
