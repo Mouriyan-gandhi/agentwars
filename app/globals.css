@@ -1,0 +1,149 @@
+@import "tailwindcss";
+
+@theme {
+  /* Caldera palette */
+  --color-ember: #fc5000;
+  --color-plasma-violet: #524ae9;
+  --color-sulfur: #f5f28e;
+  --color-limestone: #f7f6f2;
+  --color-pumice: #e2e2df;
+  --color-obsidian: #070607;
+  --color-chalk: #ffffff;
+
+  /* fonts (Anton is the closest free sub for PP Neue Corp Compact) */
+  --font-display: Anton, "PP Neue Corp Compact", "Bebas Neue", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+
+  /* radii */
+  --radius-card: 40px;
+  --radius-pill: 800px;
+  --radius-input: 100px;
+  --radius-small: 16px;
+
+  /* type scale */
+  --text-caption: 12px;
+  --text-body-sm: 14px;
+  --text-body: 16px;
+  --text-subheading: 26px;
+  --text-heading-sm: 30px;
+  --text-heading: 32px;
+  --text-heading-lg: 48px;
+  --text-heading-2xl: 80px;
+}
+
+:root {
+  color-scheme: light;
+  --background: var(--color-pumice);
+  --foreground: var(--color-obsidian);
+}
+
+html,
+body {
+  background: var(--color-pumice);
+  color: var(--color-obsidian);
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  color: var(--color-obsidian);
+}
+
+/* small helpers used across pages */
+.card {
+  background: var(--color-limestone);
+  border-radius: var(--radius-card);
+  padding: 40px;
+}
+.card-sm {
+  background: var(--color-limestone);
+  border-radius: 24px;
+  padding: 20px;
+}
+.btn-primary {
+  background: var(--color-ember);
+  color: var(--color-obsidian);
+  border-radius: var(--radius-pill);
+  padding: 12px 24px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  transition: filter 0.15s ease;
+}
+.btn-primary:hover { filter: brightness(0.95); }
+.btn-secondary {
+  background: transparent;
+  border: 1.5px solid var(--color-obsidian);
+  color: var(--color-obsidian);
+  border-radius: 40px;
+  padding: 10px 20px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+  transition: background 0.15s ease;
+}
+.btn-secondary:hover { background: rgba(7,6,7,0.04); }
+.btn-ghost {
+  background: transparent;
+  border: none;
+  color: var(--color-obsidian);
+  border-radius: 800px;
+  padding: 6px 14px;
+  font-weight: 500;
+  font-size: 15px;
+  cursor: pointer;
+}
+.btn-ghost:hover { background: rgba(7,6,7,0.06); }
+.tag {
+  background: var(--color-sulfur);
+  color: var(--color-obsidian);
+  border-radius: var(--radius-pill);
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-block;
+}
+.input {
+  background: var(--color-chalk);
+  border: 1.5px solid var(--color-obsidian);
+  border-radius: var(--radius-input);
+  padding: 14px 20px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--color-obsidian);
+  width: 100%;
+  outline: none;
+}
+.input:focus { border-color: var(--color-ember); }
+.textarea {
+  background: var(--color-chalk);
+  border: 1.5px solid var(--color-obsidian);
+  border-radius: 24px;
+  padding: 16px 20px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 15px;
+  color: var(--color-obsidian);
+  width: 100%;
+  outline: none;
+  resize: vertical;
+}
+.textarea:focus { border-color: var(--color-ember); }
+.halftone {
+  background:
+    radial-gradient(circle at 2px 2px, rgba(252,80,0,0.9) 1.5px, transparent 2px) 0 0 / 12px 12px,
+    linear-gradient(135deg, var(--color-plasma-violet) 0%, var(--color-ember) 100%);
+  border-radius: var(--radius-card);
+}
