@@ -16,6 +16,25 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+### Getting the `.env`
+
+The real `.env` is tracked in this repo as **base64** inside `.env.b64`. After
+cloning, run:
+
+```bash
+python3 scripts/env_tool.py decode
+```
+
+That writes `.env` from `.env.b64`. If you edit `.env`, run the inverse to
+update the committed copy:
+
+```bash
+python3 scripts/env_tool.py encode
+```
+
+> Base64 is encoding, not encryption. Anyone with repo access can read the
+> secrets. Rotate the keys before making this repo public.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

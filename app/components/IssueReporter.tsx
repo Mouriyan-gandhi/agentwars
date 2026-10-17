@@ -36,6 +36,8 @@ export default function IssueReporter({
 }: Props) {
   const [step, setStep] = useState<1 | 2>(1);
   const [category, setCategory] = useState<Category | null>(null);
+  const [customTitle, setCustomTitle] = useState("");
+  const [notifyEmail, setNotifyEmail] = useState("");
   const [text, setText] = useState("");
   const [img, setImg] = useState<UploadedImage | null>(null);
   const [audio, setAudio] = useState<UploadedAudio | null>(null);
@@ -146,6 +148,10 @@ export default function IssueReporter({
       if (customerEmail) body.customer_email = customerEmail;
       if (img) body.image_url = img.url;
       if (audio) body.audio_url = audio.url;
+      if (category?.value === "other" && customTitle.trim()) {
+        body.custom_issue_title = customTitle.trim();
+      }
+      if (notifyEmail.trim()) body.notify_email = notifyEmail.trim();
 
       const res = await fetch("/api/incidents", {
         method: "POST",
@@ -162,7 +168,9 @@ export default function IssueReporter({
     }
   }
 
-  const canSubmit = !!category && (text.trim().length > 0 || !!img || !!audio);
+  const otherNeedsTitle = category?.value === "other" && customTitle.trim().length === 0;
+  const canSubmit =
+    !!category && !otherNeedsTitle && (text.trim().length > 0 || !!img || !!audio);
 
   return (
     <div className="rounded-[40px] bg-pumice p-8">
@@ -218,6 +226,21 @@ export default function IssueReporter({
             <span className="tag">{category.label}</span>
           </div>
 
+          {category.value === "other" && (
+            <>
+              <label className="mb-2 block text-caption uppercase tracking-wide text-obsidian/60">
+                Name the issue (your own title) <span className="text-ember">*</span>
+              </label>
+              <input
+                value={customTitle}
+                onChange={(e) => setCustomTitle(e.target.value)}
+                className="input mb-4"
+                placeholder="e.g. Lift is broken, I'm stuck on floor 7"
+                maxLength={120}
+              />
+            </>
+          )}
+
           <label className="mb-2 block text-caption uppercase tracking-wide text-obsidian/60">
             Describe what happened (optional if you record or upload)
           </label>
@@ -227,6 +250,17 @@ export default function IssueReporter({
             rows={4}
             className="textarea mb-4"
             placeholder={`e.g. ${category.hint}`}
+          />
+
+          <label className="mb-2 block text-caption uppercase tracking-wide text-obsidian/60">
+            Also send this issue to (optional email)
+          </label>
+          <input
+            type="email"
+            value={notifyEmail}
+            onChange={(e) => setNotifyEmail(e.target.value)}
+            className="input mb-4"
+            placeholder="supervisor@company.com"
           />
 
           <div className="mb-4 grid gap-4 md:grid-cols-2">

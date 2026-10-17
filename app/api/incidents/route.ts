@@ -3,6 +3,7 @@ import { z } from "zod";
 import { supabaseAdmin } from "@/lib/supabase";
 import { runWorkflow } from "@/lib/workflow";
 import { getSession } from "@/lib/session";
+import { sendEmail } from "@/lib/resend";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -17,6 +18,10 @@ const Body = z.object({
   issue_category: z.string().optional().nullable(),
   // For customer complaints without a session: proves the submitter owns the order.
   customer_email: z.string().email().optional().nullable(),
+  // "Other" category: user-provided title for an issue that doesn't fit a chip.
+  custom_issue_title: z.string().max(200).optional().nullable(),
+  // Optional additional recipient the reporter wants a copy of this issue sent to.
+  notify_email: z.string().email().optional().nullable(),
 });
 
 export async function POST(req: NextRequest) {
@@ -43,7 +48,17 @@ export async function POST(req: NextRequest) {
     order_code,
     issue_category,
     customer_email,
+    custom_issue_title,
+    notify_email,
   } = parsed.data;
+
+  // If "other" is picked, prepend the user's own title to the raw_input so Gemini
+  // and the admin view both see the user's framing. Keeps raw_input the single
+  // source of truth for the text payload.
+  const effectiveRawInput =
+    issue_category === "other" && custom_issue_title
+      ? `[${custom_issue_title.trim()}] ${raw_input?.trim() ?? ""}`.trim()
+      : raw_input ?? null;
 
   const session = await getSession();
 
@@ -122,7 +137,7 @@ export async function POST(req: NextRequest) {
       input_type,
       source,
       issue_category: issue_category ?? null,
-      raw_input: raw_input ?? null,
+      raw_input: effectiveRawInput,
       image_url: image_url ?? null,
       audio_url: audio_url ?? null,
       order_id: orderId,
@@ -137,6 +152,78 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
+  if (notify_email) {
+    await notifyExtraRecipient({
+      incidentId: data.id,
+      recipient: notify_email,
+      source,
+      orderCode: order_code ?? null,
+      issueTitle:
+        custom_issue_title?.trim() ||
+        issue_category ||
+        "Delivery issue reported",
+      rawInput: effectiveRawInput,
+    });
+  }
+
   const result = await runWorkflow(data.id);
   return NextResponse.json({ incident: result.incident, decision: result.decision ?? null });
+}
+
+async function notifyExtraRecipient(opts: {
+  incidentId: string;
+  recipient: string;
+  source: "rider_report" | "customer_complaint";
+  orderCode: string | null;
+  issueTitle: string;
+  rawInput: string | null;
+}) {
+  const subject = opts.orderCode
+    ? `New issue on ${opts.orderCode}: ${opts.issueTitle}`
+    : `New delivery issue: ${opts.issueTitle}`;
+  const sourceLabel =
+    opts.source === "customer_complaint" ? "Customer complaint" : "Rider report";
+  const html = `
+    <div style="font-family:system-ui,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#111">
+      <h2 style="margin:0 0 12px 0">ParcelPilot · ${sourceLabel}</h2>
+      ${opts.orderCode ? `<p><b>Order:</b> ${escapeHtml(opts.orderCode)}</p>` : ""}
+      <p><b>Issue:</b> ${escapeHtml(opts.issueTitle)}</p>
+      ${
+        opts.rawInput
+          ? `<p><b>Details:</b></p><p style="white-space:pre-wrap">${escapeHtml(opts.rawInput)}</p>`
+          : ""
+      }
+      <p style="font-size:12px;color:#666">
+        Our AI operations agent is already investigating. Reference ${opts.incidentId.slice(0, 8)}.
+      </p>
+    </div>`;
+
+  const send = await sendEmail({
+    to: opts.recipient,
+    subject,
+    html,
+    idempotencyKey: `incident-${opts.incidentId}-notify-extra`,
+  });
+
+  await supabaseAdmin()
+    .from("notifications")
+    .insert({
+      incident_id: opts.incidentId,
+      recipient: opts.recipient,
+      subject,
+      body: html,
+      status: send.ok ? "sent" : "failed",
+      email_id: send.ok ? send.id : null,
+      error: send.ok ? null : send.error,
+      sent_at: send.ok ? new Date().toISOString() : null,
+    });
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
