@@ -1,8 +1,21 @@
 # ParcelPilot — Architecture
 
-> One autonomous agent, three portals, zero stuck deliveries. ParcelPilot takes a
-> delivery exception from the moment it is reported through to a verified resolution,
-> acting on real external services the whole way (Supabase, Resend, Gemini).
+> One autonomous **multi-agent system** (Google ADK · A2A protocol · MCP tools),
+> three portals, zero stuck deliveries. ParcelPilot takes a delivery exception
+> from the moment it is reported through to a verified resolution, acting on
+> real external services the whole way (Supabase, Resend, Gemini).
+
+**TL;DR of the latest changes (see `JUDGE_PACK.md`):**
+- The "brain" is now a 5-agent Google ADK pipeline running in a Python sidecar
+  (`agent_service/`). Communication: **A2A (Agent-to-Agent)**.
+- The first agent — **PII Guardian** — masks every piece of personal data
+  before any other agent sees it. Classifier / Planner / Evaluator work only
+  on tokens like `<<NAME_1>>`, `<<ADDR_1>>`.
+- The **Evaluator** scores every plan on truthfulness / hallucination /
+  groundedness. If the score is too low, a **self-heal LoopAgent** retries
+  the Planner with higher temperature + admin-corrected examples.
+- Next.js executes the approved plan by calling **MCP tools** (`lib/mcp.ts`,
+  `app/api/mcp/route.ts`) for Supabase and Resend.
 
 ---
 

@@ -118,6 +118,48 @@ export type Incident = {
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+  masked_input: string | null;
+  pii_map: Record<string, string> | null;
+  notify_email: string | null;
+  eval_score: number | null;
+  eval_hallucination: number | null;
+  eval_truthfulness: number | null;
+  eval_grounded: number | null;
+  heal_attempts: number;
+  total_tokens_in: number;
+  total_tokens_out: number;
+  total_cost_usd: number;
+  total_latency_ms: number;
+  pii_leak_detected: boolean;
+};
+
+export type AgentTraceStep = {
+  id: string;
+  incident_id: string;
+  step_index: number;
+  agent_name: string;
+  protocol: "a2a" | "mcp" | "direct";
+  input: Record<string, unknown> | null;
+  output: Record<string, unknown> | null;
+  model: string | null;
+  latency_ms: number | null;
+  status: "ok" | "error";
+  error: string | null;
+  created_at: string;
+};
+
+export type AgentEvaluationRow = {
+  id: string;
+  incident_id: string;
+  attempt: number;
+  truthfulness: number | null;
+  hallucination: number | null;
+  grounded: number | null;
+  overall: number | null;
+  verdict: "pass" | "retry" | "escalate" | null;
+  reasoning: string | null;
+  evaluator_model: string | null;
+  created_at: string;
 };
 
 export type DecisionFeedback = {
