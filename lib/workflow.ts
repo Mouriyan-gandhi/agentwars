@@ -1,6 +1,7 @@
 import { supabaseAdmin } from "./supabase";
-import { analyzeIncident, fetchRecentFeedback, type GeminiPart } from "./gemini";
-import { sendEmail, clarificationEmailHtml } from "./resend";
+import { fetchRecentFeedback, feedbackForA2A } from "./gemini";
+import { callA2AAnalyze, type A2AAnalyzeRequest } from "./agentA2A";
+import { callTool } from "./mcp";
 import { generateToken } from "./token";
 import type {
   AgentDecision,
@@ -24,15 +25,15 @@ async function logAction(
   status: "started" | "success" | "failed" | "retrying",
   payload: { result?: Record<string, unknown>; message?: string } = {},
 ) {
-  await supabaseAdmin()
-    .from("action_logs")
-    .insert({
-      incident_id: incidentId,
-      action,
-      status,
-      result: payload.result ?? null,
-      message: payload.message ?? null,
-    });
+  // Routed through the MCP tool so every executor side-effect goes through
+  // the same contract the brain would use if it were calling us remotely.
+  await callTool("log_action", {
+    incident_id: incidentId,
+    action,
+    status,
+    message: payload.message,
+    result: payload.result,
+  });
 }
 
 async function updateIncident(
@@ -75,40 +76,136 @@ async function findOrderByCode(code: string): Promise<Order | null> {
 export async function runWorkflow(incidentId: string): Promise<RunResult> {
   let incident = await getIncident(incidentId);
 
-  // Step 1: analyze with Gemini (if not done yet).
+  // Step 1: multi-agent analysis via Google ADK sidecar (A2A).
+  // The sidecar runs: PII Guardian → Classifier → Planner → Evaluator → Self-heal loop.
+  // Next.js never passes raw PII to the brain — it goes in once (so Guardian
+  // can learn the known values), and from the sidecar's response we persist
+  // the masked_input + pii_map. Only Next.js (this process) can unmask.
   if (incident.status === "received") {
     incident = await updateIncident(incident.id, { status: "analyzing" });
     await logAction(incident.id, "analyze", "started");
 
     try {
-      const parts = await buildGeminiParts(incident);
+      const orderContext = await loadOrderContext(incident);
       const feedbackExamples = await fetchRecentFeedback(5);
 
-      const decision = await analyzeIncident({
-        parts,
+      const req: A2AAnalyzeRequest = {
+        incident_id: incident.id,
         source: incident.source,
-        issueCategory: incident.issue_category ?? null,
-        orderCode: await lookupOrderCode(incident),
-        feedbackExamples,
+        raw_input: incident.raw_input,
+        issue_category: incident.issue_category ?? null,
+        notify_email: incident.notify_email ?? null,
+        order_context: orderContext,
+        feedback_examples: feedbackForA2A(feedbackExamples),
+      };
+
+      // Attach image / audio bytes if present (multimodal).
+      if (incident.image_url) {
+        try {
+          const { base64, mimeType } = await fetchBinary(incident.image_url, "image/jpeg");
+          req.image_b64 = base64;
+          req.image_mime = mimeType;
+        } catch { /* non-fatal */ }
+      }
+      if (incident.audio_url) {
+        try {
+          const { base64, mimeType } = await fetchBinary(incident.audio_url, "audio/webm");
+          req.audio_b64 = base64;
+          req.audio_mime = mimeType;
+        } catch { /* non-fatal */ }
+      }
+
+      const a2aStart = Date.now();
+      const res = await callA2AAnalyze(req);
+      const a2aLatency = Date.now() - a2aStart;
+      const decision = res.decision as unknown as AgentDecision;
+
+      // Roll up token economics across every agent step. The sidecar embeds
+      // {_usage: {tokens_in, tokens_out, cost_usd}} in each step's output.
+      let totalTokensIn = 0;
+      let totalTokensOut = 0;
+      let totalCost = 0;
+      let piiLeak = false;
+      for (const s of res.trace) {
+        const u = (s.output as { _usage?: { tokens_in?: number; tokens_out?: number; cost_usd?: number } } | null)?._usage;
+        if (u) {
+          totalTokensIn += u.tokens_in ?? 0;
+          totalTokensOut += u.tokens_out ?? 0;
+          totalCost += u.cost_usd ?? 0;
+        }
+        const leak = (s.output as { pii_leak?: { leaked?: boolean } } | null)?.pii_leak;
+        if (leak?.leaked) piiLeak = true;
+      }
+
+      // Persist the trace + evaluation. Each row of agent_trace represents one
+      // A2A hop between agents in the pipeline.
+      await supabaseAdmin()
+        .from("agent_trace")
+        .insert(
+          res.trace.map((s) => ({
+            incident_id: incident.id,
+            step_index: s.step_index,
+            agent_name: s.agent_name,
+            protocol: s.protocol,
+            input: s.input ?? null,
+            output: s.output ?? null,
+            model: s.model,
+            latency_ms: s.latency_ms,
+            status: s.status,
+            error: s.error,
+          })),
+        );
+      await supabaseAdmin().from("agent_evaluations").insert({
+        incident_id: incident.id,
+        attempt: res.heal_attempts + 1,
+        truthfulness: res.evaluation.truthfulness,
+        hallucination: res.evaluation.hallucination,
+        grounded: res.evaluation.grounded,
+        overall: res.evaluation.overall,
+        verdict: res.evaluation.verdict,
+        reasoning: res.evaluation.reasoning,
+        evaluator_model: "gemini-2.0-flash",
       });
 
-      // Try to attach the order referenced in the report.
+      // The planner may still produce an orderCode token (e.g. <<ORDER_1>>);
+      // unmask it before using it to look up the order.
+      let orderCodeReal: string | null = null;
+      if (decision.orderCode) {
+        orderCodeReal = res.pii_map[decision.orderCode] ?? decision.orderCode;
+      }
+
       let orderId: string | null = incident.order_id;
-      if (!orderId && decision.orderCode) {
-        const order = await findOrderByCode(decision.orderCode);
+      if (!orderId && orderCodeReal) {
+        const order = await findOrderByCode(orderCodeReal);
         if (order) orderId = order.id;
       }
 
       incident = await updateIncident(incident.id, {
-        analysis: decision,
+        analysis: { ...decision, orderCode: orderCodeReal },
         type: decision.incidentType,
         description: decision.summary,
+        masked_input: res.masked_input,
+        pii_map: res.pii_map,
+        eval_score: res.evaluation.overall,
+        eval_hallucination: res.evaluation.hallucination,
+        eval_truthfulness: res.evaluation.truthfulness,
+        eval_grounded: res.evaluation.grounded,
+        heal_attempts: res.heal_attempts,
+        total_tokens_in: totalTokensIn,
+        total_tokens_out: totalTokensOut,
+        total_cost_usd: Number(totalCost.toFixed(6)),
+        total_latency_ms: a2aLatency,
+        pii_leak_detected: piiLeak,
         order_id: orderId,
       });
       await logAction(incident.id, "analyze", "success", {
         result: {
           decision: decision as unknown as Record<string, unknown>,
           used_feedback_examples: feedbackExamples.length,
+          agents_run: res.trace.length,
+          heal_attempts: res.heal_attempts,
+          eval_overall: res.evaluation.overall,
+          eval_verdict: res.evaluation.verdict,
         },
       });
     } catch (err) {
@@ -179,23 +276,25 @@ async function executeAction(
         return { incident: updated, decision, action, message: "Escalated: no order" };
       }
 
-      const db = supabaseAdmin();
-      const { data: order } = await db
-        .from("orders")
-        .select("*")
-        .eq("id", incident.order_id)
-        .single();
+      // All I/O goes through MCP tools now — same contract the brain would hit remotely.
+      const order = (await callTool<Order | null>("get_order_by_code", {
+        order_code: (incident.analysis?.orderCode ?? "") || "",
+      })) ||
+        // Fallback: direct id-based lookup is also wrapped in a tool call.
+        (await (async () => {
+          const { data } = await supabaseAdmin()
+            .from("orders")
+            .select("*")
+            .eq("id", incident.order_id!)
+            .single();
+          return data as Order | null;
+        })());
 
-      const previousRiderId: string | null = (order as Order | null)?.rider_id ?? null;
+      const previousRiderId: string | null = order?.rider_id ?? null;
 
-      // Find an available rider that isn't the current one.
-      let query = db
-        .from("riders")
-        .select("*")
-        .eq("status", "available")
-        .limit(1);
-      if (previousRiderId) query = query.neq("id", previousRiderId);
-      const { data: nextRider } = await query.maybeSingle();
+      const nextRider = await callTool<Rider | null>("find_available_rider", {
+        exclude_rider_id: previousRiderId ?? undefined,
+      });
 
       if (!nextRider) {
         await logAction(incident.id, "propose_reassignment", "failed", {
@@ -209,15 +308,11 @@ async function executeAction(
         return { incident: updated, decision, action, message: "Escalated: no alternate rider" };
       }
 
-      // Reassign the order to the new rider.
-      await db.from("orders").update({ rider_id: nextRider.id }).eq("id", incident.order_id);
-
-      // Mark the previous rider available again (if any).
-      if (previousRiderId) {
-        await db.from("riders").update({ status: "available" }).eq("id", previousRiderId);
-      }
-      // Mark the new rider as busy (optional; makes the fleet view feel alive).
-      await db.from("riders").update({ status: "busy" }).eq("id", nextRider.id);
+      await callTool("reassign_order", {
+        order_id: incident.order_id,
+        new_rider_id: nextRider.id,
+        previous_rider_id: previousRiderId ?? undefined,
+      });
 
       const updated = await updateIncident(incident.id, {
         rider_id: nextRider.id,
@@ -228,7 +323,8 @@ async function executeAction(
         result: {
           previous_rider_id: previousRiderId,
           new_rider_id: nextRider.id,
-          new_rider_name: (nextRider as Rider).name,
+          new_rider_name: nextRider.name,
+          via: "mcp:reassign_order",
         },
       });
       return { incident: updated, decision, action };
@@ -367,46 +463,29 @@ async function sendCustomerClarification(
     opts.subjectOverride ||
     `Action needed for order ${o.order_code}: ${shortSubject(decision)}`;
 
-  const html = clarificationEmailHtml({
-    orderCode: o.order_code,
-    customerName: o.customer_name,
-    summary: decision.summary,
-    missing: decision.missingInformation.length
-      ? decision.missingInformation
-      : ["Please confirm your delivery details"],
-    formUrl,
-  });
-
-  // Record the notification row first (queued), then send.
-  const { data: notif, error: notifErr } = await supabaseAdmin()
-    .from("notifications")
-    .insert({
-      incident_id: incident.id,
-      recipient: o.customer_email,
-      subject,
-      body: html,
-      status: "queued",
-    })
-    .select("id")
-    .single();
-  if (notifErr) throw new Error(`notification insert: ${notifErr.message}`);
-
   await logAction(incident.id, "send_email", "started", {
-    result: { to: o.customer_email, notification_id: notif.id },
+    result: { to: o.customer_email, via: "mcp:send_clarification_email" },
   });
 
-  const result = await sendEmail({
-    to: o.customer_email,
-    subject,
-    html,
-    idempotencyKey: `incident-${incident.id}-attempt-${incident.attempt_count + 1}`,
-  });
+  // Send + notification row persist via MCP tool.
+  const result = await callTool<{ ok: true; email_id: string } | { ok: false; error: string }>(
+    "send_clarification_email",
+    {
+      incident_id: incident.id,
+      to: o.customer_email,
+      order_code: o.order_code,
+      customer_name: o.customer_name,
+      summary: decision.summary,
+      missing: decision.missingInformation.length
+        ? decision.missingInformation
+        : ["Please confirm your delivery details"],
+      form_url: formUrl,
+      subject,
+      idempotency_key: `incident-${incident.id}-attempt-${incident.attempt_count + 1}`,
+    },
+  );
 
   if (!result.ok) {
-    await supabaseAdmin()
-      .from("notifications")
-      .update({ status: "failed", error: result.error })
-      .eq("id", notif.id);
     await logAction(incident.id, "send_email", "failed", { message: result.error });
 
     const next = incident.attempt_count + 1;
@@ -419,12 +498,8 @@ async function sendCustomerClarification(
     return { incident: updated, decision, message: `Email failed: ${result.error}` };
   }
 
-  await supabaseAdmin()
-    .from("notifications")
-    .update({ status: "sent", email_id: result.id, sent_at: new Date().toISOString() })
-    .eq("id", notif.id);
   await logAction(incident.id, "send_email", "success", {
-    result: { email_id: result.id },
+    result: { email_id: result.email_id, via: "mcp:send_clarification_email" },
   });
 
   const updated = await updateIncident(incident.id, {
@@ -529,41 +604,6 @@ function shortSubject(decision: AgentDecision): string {
   return "delivery issue";
 }
 
-async function buildGeminiParts(incident: Incident): Promise<GeminiPart[]> {
-  const parts: GeminiPart[] = [];
-
-  if (incident.raw_input && incident.raw_input.trim()) {
-    parts.push({ kind: "text", text: incident.raw_input.trim() });
-  }
-
-  if (incident.image_url) {
-    try {
-      const { base64, mimeType } = await fetchBinary(incident.image_url, "image/jpeg");
-      parts.push({ kind: "image", mimeType, base64 });
-    } catch (err) {
-      // Non-fatal: continue with whatever parts we have.
-      parts.push({
-        kind: "text",
-        text: `(image fetch failed: ${err instanceof Error ? err.message : String(err)})`,
-      });
-    }
-  }
-
-  if (incident.audio_url) {
-    try {
-      const { base64, mimeType } = await fetchBinary(incident.audio_url, "audio/webm");
-      parts.push({ kind: "audio", mimeType, base64 });
-    } catch (err) {
-      parts.push({
-        kind: "text",
-        text: `(audio fetch failed: ${err instanceof Error ? err.message : String(err)})`,
-      });
-    }
-  }
-
-  return parts;
-}
-
 async function fetchBinary(url: string, fallbackMime: string) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`fetch ${res.status}`);
@@ -572,12 +612,36 @@ async function fetchBinary(url: string, fallbackMime: string) {
   return { base64: buf.toString("base64"), mimeType };
 }
 
-async function lookupOrderCode(incident: Incident): Promise<string | null> {
+async function loadOrderContext(incident: Incident) {
   if (!incident.order_id) return null;
-  const { data } = await supabaseAdmin()
+  const { data: order } = await supabaseAdmin()
     .from("orders")
-    .select("order_code")
+    .select(
+      "order_code, customer_name, customer_email, customer_phone, address, address_notes, rider_id",
+    )
     .eq("id", incident.order_id)
     .maybeSingle();
-  return (data as { order_code: string } | null)?.order_code ?? null;
+  if (!order) return null;
+
+  let rider: { name: string; phone: string | null } | null = null;
+  if (order.rider_id) {
+    const { data: r } = await supabaseAdmin()
+      .from("riders")
+      .select("name, phone")
+      .eq("id", order.rider_id)
+      .maybeSingle();
+    rider = (r as { name: string; phone: string | null } | null) ?? null;
+  }
+
+  return {
+    order_code: order.order_code,
+    customer_name: order.customer_name,
+    customer_email: order.customer_email,
+    customer_phone: order.customer_phone,
+    address: order.address,
+    address_notes: order.address_notes,
+    rider_name: rider?.name ?? null,
+    rider_phone: rider?.phone ?? null,
+  };
 }
+

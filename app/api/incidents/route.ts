@@ -143,6 +143,7 @@ export async function POST(req: NextRequest) {
       order_id: orderId,
       rider_id: riderIdForIncident,
       reported_by_user_id: reportedByUserId,
+      notify_email: notify_email ?? null,
       status: "received",
     })
     .select("*")

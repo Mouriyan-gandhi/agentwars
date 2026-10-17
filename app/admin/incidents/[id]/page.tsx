@@ -8,22 +8,34 @@ import type {
   CustomerResponse,
   AgentDecision,
   DecisionFeedback,
+  AgentTraceStep,
+  AgentEvaluationRow,
 } from "@/lib/types";
 import ResumeButton from "./ResumeButton";
 import FeedbackPanel from "./FeedbackPanel";
+import AgentChainPanel from "./AgentChainPanel";
 
 export const dynamic = "force-dynamic";
 
 async function loadIncident(id: string) {
   const db = supabaseAdmin();
-  const [{ data: incident }, { data: logs }, { data: notifications }, { data: responses }, { data: feedback }] =
-    await Promise.all([
-      db.from("incidents").select("*").eq("id", id).single(),
-      db.from("action_logs").select("*").eq("incident_id", id).order("created_at", { ascending: true }),
-      db.from("notifications").select("*").eq("incident_id", id).order("created_at", { ascending: true }),
-      db.from("customer_responses").select("*").eq("incident_id", id).order("created_at", { ascending: true }),
-      db.from("decision_feedback").select("*").eq("incident_id", id).order("created_at", { ascending: false }),
-    ]);
+  const [
+    { data: incident },
+    { data: logs },
+    { data: notifications },
+    { data: responses },
+    { data: feedback },
+    { data: trace },
+    { data: evaluations },
+  ] = await Promise.all([
+    db.from("incidents").select("*").eq("id", id).single(),
+    db.from("action_logs").select("*").eq("incident_id", id).order("created_at", { ascending: true }),
+    db.from("notifications").select("*").eq("incident_id", id).order("created_at", { ascending: true }),
+    db.from("customer_responses").select("*").eq("incident_id", id).order("created_at", { ascending: true }),
+    db.from("decision_feedback").select("*").eq("incident_id", id).order("created_at", { ascending: false }),
+    db.from("agent_trace").select("*").eq("incident_id", id).order("step_index", { ascending: true }),
+    db.from("agent_evaluations").select("*").eq("incident_id", id).order("attempt", { ascending: false }),
+  ]);
   let order: Order | null = null;
   if (incident?.order_id) {
     const { data } = await db.from("orders").select("*").eq("id", incident.order_id).maybeSingle();
@@ -36,12 +48,15 @@ async function loadIncident(id: string) {
     notifications: (notifications ?? []) as Notification[],
     responses: (responses ?? []) as CustomerResponse[],
     feedback: (feedback ?? []) as DecisionFeedback[],
+    trace: (trace ?? []) as AgentTraceStep[],
+    evaluations: (evaluations ?? []) as AgentEvaluationRow[],
   };
 }
 
 export default async function IncidentPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const { incident, order, logs, notifications, responses, feedback } = await loadIncident(id);
+  const { incident, order, logs, notifications, responses, feedback, trace, evaluations } =
+    await loadIncident(id);
 
   if (!incident) {
     return (
@@ -115,7 +130,7 @@ export default async function IncidentPage({ params }: { params: Promise<{ id: s
           )}
         </Panel>
 
-        <Panel title="Gemini analysis">
+        <Panel title="Planner decision (ADK)">
           {decision ? (
             <div className="space-y-3 text-body-sm">
               <KV label="Type" value={decision.incidentType} />
@@ -197,6 +212,22 @@ export default async function IncidentPage({ params }: { params: Promise<{ id: s
           )}
         </Panel>
       </div>
+
+      <section className="mt-10">
+        <AgentChainPanel
+          trace={trace}
+          evaluations={evaluations}
+          maskedInput={incident.masked_input}
+          rawInput={incident.raw_input}
+          piiMap={incident.pii_map}
+          healAttempts={incident.heal_attempts ?? 0}
+          totalTokensIn={incident.total_tokens_in ?? 0}
+          totalTokensOut={incident.total_tokens_out ?? 0}
+          totalCostUsd={Number(incident.total_cost_usd ?? 0)}
+          totalLatencyMs={incident.total_latency_ms ?? 0}
+          piiLeakDetected={!!incident.pii_leak_detected}
+        />
+      </section>
 
       <section className="mt-10">
         <FeedbackPanel

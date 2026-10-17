@@ -175,7 +175,7 @@ export async function fetchRecentFeedback(limit = 5): Promise<FeedbackExample[]>
   const { supabaseAdmin } = await import("./supabase");
   const { data } = await supabaseAdmin()
     .from("decision_feedback")
-    .select("verdict, suggested_action, comment, incidents(description, analysis)")
+    .select("verdict, suggested_action, comment, incidents(description, analysis, masked_input, issue_category)")
     .eq("verdict", "wrong_call")
     .order("created_at", { ascending: false })
     .limit(limit);
@@ -187,8 +187,18 @@ export async function fetchRecentFeedback(limit = 5): Promise<FeedbackExample[]>
     suggested_action: string | null;
     comment: string | null;
     incidents:
-      | { description: string | null; analysis: AgentDecision | null }
-      | Array<{ description: string | null; analysis: AgentDecision | null }>
+      | {
+          description: string | null;
+          analysis: AgentDecision | null;
+          masked_input: string | null;
+          issue_category: string | null;
+        }
+      | Array<{
+          description: string | null;
+          analysis: AgentDecision | null;
+          masked_input: string | null;
+          issue_category: string | null;
+        }>
       | null;
   };
 
@@ -199,9 +209,20 @@ export async function fetchRecentFeedback(limit = 5): Promise<FeedbackExample[]>
     })
     .filter(({ r, inc }) => r.suggested_action && inc?.analysis)
     .map(({ r, inc }) => ({
-      incidentSummary: (inc?.description ?? "").slice(0, 200),
+      incidentSummary: (inc?.masked_input ?? inc?.description ?? "").slice(0, 300),
       wrongAction: inc?.analysis?.recommendedAction ?? "unknown",
       correctAction: r.suggested_action!,
       comment: r.comment,
     }));
+}
+
+/** Convert feedback examples to the A2A sidecar's `FeedbackExample` shape. */
+export function feedbackForA2A(items: FeedbackExample[]) {
+  return items.map((e) => ({
+    masked_input: e.incidentSummary,
+    issue_category: null,
+    wrong_action: e.wrongAction,
+    correct_action: e.correctAction,
+    comment: e.comment,
+  }));
 }
