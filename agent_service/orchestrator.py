@@ -17,7 +17,6 @@ Latency: 1 required LLM call (decider) + 1 required (evaluator) + 1 optional
 from __future__ import annotations
 
 import json
-import re
 import time
 from typing import Any
 
@@ -31,6 +30,7 @@ from agents import (
     EVAL_MODEL,
 )
 from pii import guardian_mask, MaskResult
+from guardrails import injection_check, leak_check
 from schemas import (
     AgentDecision,
     AgentEvaluation,
@@ -55,53 +55,6 @@ def _usd(model: str, tin: int, tout: int) -> float:
     pin = PRICE_IN.get(model, 0.075)
     pout = PRICE_OUT.get(model, 0.30)
     return round((tin * pin + tout * pout) / 1_000_000, 6)
-
-
-# -----------------------------------------------------------------------------
-# Prompt-injection filter — detects classic attack strings and marks them.
-# Not a hard reject (that would be user-hostile); surfaces a signal the
-# Evaluator can factor in.
-# -----------------------------------------------------------------------------
-_INJECTION_PATTERNS = [
-    r"ignore (all |previous |above )?instructions?",
-    r"disregard (the )?(system|above|previous)",
-    r"you are now",
-    r"reveal (the|your) (system )?prompt",
-    r"print the (pii|map|token)s?",
-    r"<<[A-Z]+_\d+>>\s*=",
-    r"act as (an? )?(admin|developer)",
-]
-
-
-def injection_check(text: str) -> dict[str, Any]:
-    if not text:
-        return {"flagged": False, "hits": []}
-    hits = []
-    for pat in _INJECTION_PATTERNS:
-        if re.search(pat, text, flags=re.IGNORECASE):
-            hits.append(pat)
-    return {"flagged": bool(hits), "hits": hits}
-
-
-# -----------------------------------------------------------------------------
-# Independent output-side PII leak detector. Deterministic — not an LLM. If
-# a real PII value from the pii_map appears in the agent's output, that's a
-# guardrail failure regardless of what the Evaluator LLM said.
-# -----------------------------------------------------------------------------
-def leak_check(output_payload: dict[str, Any] | None, pii_map: dict[str, str]) -> dict[str, Any]:
-    if not output_payload:
-        return {"leaked": False, "hits": []}
-    blob = json.dumps(output_payload, ensure_ascii=False)
-    hits = []
-    for tok, real in pii_map.items():
-        if not real:
-            continue
-        if len(real) < 4:
-            # too short to be a reliable match (initials, "SM" etc.)
-            continue
-        if real in blob:
-            hits.append({"token": tok, "value_preview": real[:3] + "***"})
-    return {"leaked": bool(hits), "hits": hits}
 
 
 def _trace(

@@ -17,11 +17,11 @@ natural-language mentions the regex missed.
 from __future__ import annotations
 
 import re
-import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-import google.generativeai as genai
+# google.generativeai is imported lazily inside llm_mask_remaining() so the
+# deterministic regex path (and the test harness) can run with no dependencies.
 
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
@@ -125,6 +125,7 @@ def llm_mask_remaining(result: MaskResult, text: str, model_name: str) -> str:
         return text
 
     try:
+        import google.generativeai as genai  # lazy
         model = genai.GenerativeModel(model_name)
         prompt = LLM_MASK_PROMPT.format(
             existing_tokens=", ".join(result.pii_map.keys()) or "(none yet)",
