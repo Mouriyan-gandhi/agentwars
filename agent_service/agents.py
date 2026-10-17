@@ -14,7 +14,13 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
-import google.generativeai as genai
+# google.generativeai is imported lazily so the deterministic parts of the
+# orchestrator (injection filter, leak check) can be tested without the SDK.
+try:
+    import google.generativeai as genai  # noqa: F401
+    GENAI_AVAILABLE = True
+except Exception:
+    GENAI_AVAILABLE = False
 
 try:
     # Real ADK — preferred.
@@ -33,6 +39,11 @@ except Exception:  # pragma: no cover — exercised only when ADK is missing
         def run(self, prompt: str) -> str:
             # Fallback uses raw google-generativeai with the agent's instruction
             # concatenated — behaviourally equivalent for our purposes.
+            if not GENAI_AVAILABLE:
+                raise RuntimeError(
+                    "google-generativeai not installed; install requirements.txt",
+                )
+            import google.generativeai as genai  # lazy local
             m = genai.GenerativeModel(self.model, system_instruction=self.instruction)
             resp = m.generate_content(
                 prompt,
@@ -55,6 +66,7 @@ def count_tokens(model_name: str, text: str) -> int:
     if not text:
         return 0
     try:
+        import google.generativeai as genai  # lazy
         m = genai.GenerativeModel(model_name)
         resp = m.count_tokens(text)
         return int(getattr(resp, "total_tokens", 0) or 0)
